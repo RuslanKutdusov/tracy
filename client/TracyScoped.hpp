@@ -22,14 +22,7 @@ public:
         : m_active( is_active )
 #endif
     {
-        if( !m_active ) return;
-#ifdef TRACY_ON_DEMAND
-        m_connectionId = GetProfiler().ConnectionId();
-#endif
-        TracyLfqPrepare( QueueType::ZoneBegin );
-        MemWrite( &item->zoneBegin.time, Profiler::GetTime() );
-        MemWrite( &item->zoneBegin.srcloc, (uint64_t)srcloc );
-        TracyLfqCommit;
+        Profiler::BeginZone(srcloc);
     }
 
     tracy_force_inline ScopedZone( const SourceLocationData* srcloc, int depth, bool is_active = true )
@@ -39,27 +32,12 @@ public:
         : m_active( is_active )
 #endif
     {
-        if( !m_active ) return;
-#ifdef TRACY_ON_DEMAND
-        m_connectionId = GetProfiler().ConnectionId();
-#endif
-        TracyLfqPrepare( QueueType::ZoneBeginCallstack );
-        MemWrite( &item->zoneBegin.time, Profiler::GetTime() );
-        MemWrite( &item->zoneBegin.srcloc, (uint64_t)srcloc );
-        TracyLfqCommit;
-
-        GetProfiler().SendCallstack( depth );
+        Profiler::BeginZoneS( srcloc, depth );
     }
 
     tracy_force_inline ~ScopedZone()
     {
-        if( !m_active ) return;
-#ifdef TRACY_ON_DEMAND
-        if( GetProfiler().ConnectionId() != m_connectionId ) return;
-#endif
-        TracyLfqPrepare( QueueType::ZoneEnd );
-        MemWrite( &item->zoneEnd.time, Profiler::GetTime() );
-        TracyLfqCommit;
+        Profiler::EndZone();
     }
 
     tracy_force_inline void Text( const char* txt, size_t size )

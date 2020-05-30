@@ -61,7 +61,6 @@ class Profiler;
 class Socket;
 class UdpBroadcast;
 
-TRACY_API Profiler& GetProfiler();
 TRACY_API uint64_t GetThreadHandle();
 TRACY_API void InitRPMallocThread();
 
@@ -109,7 +108,6 @@ struct ThreadContext
     static const uint32_t kQueueMaxBlockSize = 64 * 1024;
     static const uint32_t kInitialQueueSize = 64 * 1024;
 
-    bool pushedToList;
     uint64_t threadHandle;
     std::atomic<bool> isActive;
     FastVector<Zone> zonesStack;
@@ -119,20 +117,14 @@ struct ThreadContext
     moodycamel::ReaderWriterQueue<QueueItem, kQueueMaxBlockSize> queue;
 
     ThreadContext() 
-       : pushedToList(false)
-       , threadHandle(GetThreadHandle())
-       , isActive(false)
+       : threadHandle(GetThreadHandle())
+       , isActive(true)
        , zonesStack(64)
 #ifdef TRACY_ON_DEMAND
        , luaZoneState({ 0, false })
 #endif
        , queue(kInitialQueueSize)
     {
-    }
-
-    ~ThreadContext()
-    {
-
     }
 };
 
@@ -200,20 +192,24 @@ public:
         return m_gpuCtxCounter;
     }
 
+    void InitThreadContext();
+
     tracy_force_inline void CheckThread()
     {
-        if (!s_threadContext.pushedToList)
+        if ( !s_threadContext )
         {
-            m_threadsCtxsLock.lock();
-            *m_threadsCtxs.push_next() = &s_threadContext;
-            m_threadsCtxsLock.unlock();
-            s_threadContext.pushedToList = true;
+            InitThreadContext();
         }
+    }
+
+    static tracy_force_inline Profiler& GetProfiler()
+    {
+        return *s_instance;
     }
 
     static tracy_force_inline ThreadContext& GetThreadContext()
     {
-        return s_threadContext;
+        return *s_threadContext;
     }
 
     static tracy_force_inline QueueItem* QueueSerial()
@@ -228,6 +224,61 @@ public:
         auto& p = GetProfiler();
         p.m_serialQueue.commit_next();
         p.m_serialLock.unlock();
+    }
+
+    static tracy_force_inline void BeginZone( const SourceLocationData* srcloc )
+    {
+        //GetProfiler().CheckThread();
+
+        ThreadContext& ctx = GetThreadContext();
+        if( !ctx.isActive.load( std::memory_order_relaxed ) )
+            return;
+
+        int64_t time = Profiler::GetTime();
+
+        TracyLfqPrepare( QueueType::ZoneBegin );
+        MemWrite( &item->zoneBegin.time, time );
+        MemWrite( &item->zoneBegin.srcloc, (uint64_t)srcloc );
+        TracyLfqCommit;
+
+        ThreadContext::Zone* stackElement = ctx.zonesStack.push_next();
+        stackElement->beginTime = time;
+        stackElement->srcLoc = srcloc;
+    }
+
+    static tracy_force_inline void BeginZoneS( const SourceLocationData* srcloc, int depth )
+    {
+        //GetProfiler().CheckThread();
+
+        ThreadContext& ctx = GetThreadContext();
+        if( !ctx.isActive.load( std::memory_order_relaxed ) )
+            return;
+
+        int64_t time = Profiler::GetTime();
+
+        TracyLfqPrepare( QueueType::ZoneBegin );
+        MemWrite( &item->zoneBegin.time, time );
+        MemWrite( &item->zoneBegin.srcloc, (uint64_t)srcloc );
+        TracyLfqCommit;
+
+        GetProfiler().SendCallstack( depth );
+
+        ThreadContext::Zone* stackElement = ctx.zonesStack.push_next();
+        stackElement->beginTime = time;
+        stackElement->srcLoc = srcloc;
+    }
+
+    static tracy_force_inline void EndZone()
+    {
+        ThreadContext& ctx = GetThreadContext();
+        if( !ctx.isActive.load( std::memory_order_relaxed ) )
+            return;
+
+        TracyLfqPrepare( QueueType::ZoneEnd );
+        MemWrite( &item->zoneEnd.time, Profiler::GetTime() );
+        TracyLfqCommit;
+
+        ctx.zonesStack.pop_back();
     }
 
     static tracy_force_inline void SendFrameMark( const char* name )
@@ -341,7 +392,7 @@ public:
         MemWrite( &item->message.text, (uint64_t)ptr );
         TracyLfqCommit;
 
-        if( callstack != 0 ) tracy::GetProfiler().SendCallstack( callstack );
+        if( callstack != 0 ) GetProfiler().SendCallstack( callstack );
     }
 
     static tracy_force_inline void Message( const char* txt, int callstack )
@@ -354,7 +405,7 @@ public:
         MemWrite( &item->message.text, (uint64_t)txt );
         TracyLfqCommit;
 
-        if( callstack != 0 ) tracy::GetProfiler().SendCallstack( callstack );
+        if( callstack != 0 ) GetProfiler().SendCallstack( callstack );
     }
 
     static tracy_force_inline void MessageColor( const char* txt, size_t size, uint32_t color, int callstack )
@@ -373,7 +424,7 @@ public:
         MemWrite( &item->messageColor.b, uint8_t( ( color >> 16 ) & 0xFF ) );
         TracyLfqCommit;
 
-        if( callstack != 0 ) tracy::GetProfiler().SendCallstack( callstack );
+        if( callstack != 0 ) GetProfiler().SendCallstack( callstack );
     }
 
     static tracy_force_inline void MessageColor( const char* txt, uint32_t color, int callstack )
@@ -389,7 +440,7 @@ public:
         MemWrite( &item->messageColor.b, uint8_t( ( color >> 16 ) & 0xFF ) );
         TracyLfqCommit;
 
-        if( callstack != 0 ) tracy::GetProfiler().SendCallstack( callstack );
+        if( callstack != 0 ) GetProfiler().SendCallstack( callstack );
     }
 
     static tracy_force_inline void MessageAppInfo( const char* txt, size_t size )
@@ -702,7 +753,7 @@ private:
     
     TracyMutex m_threadsCtxsLock;
     FastVector<ThreadContext*> m_threadsCtxs;
-    static thread_local ThreadContext s_threadContext;
+    static thread_local ThreadContext* s_threadContext;
 
     int64_t m_refTimeSerial;
     int64_t m_refTimeCtx;
@@ -740,7 +791,15 @@ private:
 #endif
 
     ParameterCallback m_paramCallback;
+
+    static Profiler* s_instance;
 };
+
+
+tracy_force_inline Profiler& GetProfiler()
+{
+    return Profiler::GetProfiler();
+}
 
 }
 

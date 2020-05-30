@@ -73,6 +73,11 @@ public:
         m_write++;
     }
 
+    void pop_back()
+    {
+        m_write--;
+    }
+
     void clear()
     {
         m_write = m_ptr;

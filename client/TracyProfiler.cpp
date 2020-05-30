@@ -843,13 +843,18 @@ static void CrashHandler( int signal, siginfo_t* info, void* /*ucontext*/ )
 
 enum { QueuePrealloc = 256 * 1024 };
 
-static Profiler* s_instance;
+Profiler* Profiler::s_instance;
 static Thread* s_thread;
 static Thread* s_compressThread;
 
 #ifdef TRACY_HAS_SYSTEM_TRACING
 static Thread* s_sysTraceThread = nullptr;
 #endif
+
+struct ThreadContextInit
+{
+    ThreadContextInit();
+};
 
 #ifdef TRACY_DELAYED_INIT
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>& GetQueue();
@@ -944,7 +949,8 @@ TRACY_API void InitRPMallocThread()
 // MSVC static initialization order solution. gcc/clang uses init_order() to avoid all this.
 // 2. If these variables would be in the .CRT$XCB section, they would be initialized only in main thread.
 thread_local RPMallocInit init_order(104) s_rpmalloc_thread_init;
-thread_local ThreadContext init_order(105) Profiler::s_threadContext;
+thread_local ThreadContext* init_order(105) Profiler::s_threadContext = nullptr;
+thread_local ThreadContextInit init_order(106) s_threadContextInit;
 
 #  ifdef _MSC_VER
 // 1. Initialize these static variables before all other variables.
@@ -955,9 +961,12 @@ static int64_t init_order(101) s_initTime { SetupHwTimer() };
 static RPMallocInit init_order(102) s_rpmalloc_init;
 static Profiler init_order(103) s_profiler;
 
-TRACY_API Profiler& GetProfiler() { return s_profiler; }
-
 #endif
+
+ThreadContextInit::ThreadContextInit()
+{
+    GetProfiler().InitThreadContext();
+}
 
 Profiler::Profiler()
     : m_timeBegin( 0 )
@@ -995,10 +1004,13 @@ Profiler::Profiler()
     assert( !s_instance );
     s_instance = this;
     
-    CheckThread();
+    void* mem = tracy_malloc( sizeof( ThreadContext ) );
+    s_threadContext = new( mem ) ThreadContext();
+    *m_threadsCtxs.push_next() = s_threadContext;
 
     CalibrateTimer();
     CalibrateDelay();
+    ReportTopology();
 
 #ifndef TRACY_NO_EXIT
     const char* noExitEnv = getenv( "TRACY_NO_EXIT" );
@@ -1090,6 +1102,11 @@ Profiler::~Profiler()
         tracy_free( m_broadcast );
     }
 
+    for( ThreadContext* ctx : m_threadsCtxs )
+    {
+        tracy_free(ctx);
+    }
+
     assert( s_instance );
     s_instance = nullptr;
 }
@@ -1122,8 +1139,6 @@ void Profiler::Worker()
 #endif
 
     while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
-
-    ReportTopology();
 
     const auto procname = GetProcessName();
     const auto pnsz = std::min<size_t>( strlen( procname ), WelcomeMessageProgramNameSize - 1 );
@@ -1722,7 +1737,7 @@ Profiler::DequeueStatus Profiler::Dequeue()
         int64_t refThread = 0;
         int64_t refCtx = m_refTimeCtx;
         int64_t refGpu = m_refTimeGpu;
-        while(ctx->queue.try_dequeue(item))
+        while( ctx->queue.try_dequeue( item ) )
         {
             uint64_t ptr;
             auto idx = MemRead<uint8_t>(&item.hdr.idx);
@@ -2800,6 +2815,18 @@ int64_t Profiler::GetTimeQpc()
     return t.QuadPart;
 }
 #endif
+
+
+void Profiler::InitThreadContext()
+{
+    if( s_threadContext )
+        return;
+    void* mem = tracy_malloc( sizeof( ThreadContext ) );
+    s_threadContext = new( mem ) ThreadContext();
+    m_threadsCtxsLock.lock();
+    *m_threadsCtxs.push_next() = s_threadContext;
+    m_threadsCtxsLock.unlock();
+}
 
 }
 
