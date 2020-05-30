@@ -52,10 +52,7 @@ extern "C" typedef HRESULT (WINAPI *t_GetThreadDescription)( HANDLE, PWSTR* );
 namespace tracy
 {
 
-namespace detail
-{
-
-TRACY_API uint64_t GetThreadHandleImpl()
+TRACY_API uint64_t GetThreadHandle()
 {
 #if defined _WIN32 || defined __CYGWIN__
     static_assert( sizeof( decltype( GetCurrentThreadId() ) ) <= sizeof( uint64_t ), "Thread handle too big to fit in protocol" );
@@ -84,19 +81,6 @@ TRACY_API uint64_t GetThreadHandleImpl()
 #endif
 
 }
-
-}
-
-#ifdef TRACY_ENABLE
-struct ThreadNameData
-{
-    uint64_t id;
-    const char* name;
-    ThreadNameData* next;
-};
-std::atomic<ThreadNameData*>& GetThreadNameData();
-TRACY_API void InitRPMallocThread();
-#endif
 
 TRACY_API void SetThreadName( const char* name )
 {
@@ -154,36 +138,11 @@ TRACY_API void SetThreadName( const char* name )
         }
     }
 #endif
-#ifdef TRACY_ENABLE
-    {
-        InitRPMallocThread();
-        const auto sz = strlen( name );
-        char* buf = (char*)tracy_malloc( sz+1 );
-        memcpy( buf, name, sz );
-        buf[sz+1] = '\0';
-        auto data = (ThreadNameData*)tracy_malloc( sizeof( ThreadNameData ) );
-        data->id = detail::GetThreadHandleImpl();
-        data->name = buf;
-        data->next = GetThreadNameData().load( std::memory_order_relaxed );
-        while( !GetThreadNameData().compare_exchange_weak( data->next, data, std::memory_order_release, std::memory_order_relaxed ) ) {}
-    }
-#endif
 }
 
 TRACY_API const char* GetThreadName( uint64_t id )
 {
     static char buf[256];
-#ifdef TRACY_ENABLE
-    auto ptr = GetThreadNameData().load( std::memory_order_relaxed );
-    while( ptr )
-    {
-        if( ptr->id == id )
-        {
-            return ptr->name;
-        }
-        ptr = ptr->next;
-    }
-#else
 #  if defined _WIN32 || defined __CYGWIN__
     static auto _GetThreadDescription = (t_GetThreadDescription)GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "GetThreadDescription" );
     if( _GetThreadDescription )
@@ -231,7 +190,6 @@ TRACY_API const char* GetThreadName( uint64_t id )
 #   endif
     return buf;
 #  endif
-#endif
     sprintf( buf, "%" PRIu64, id );
     return buf;
 }

@@ -15,9 +15,9 @@ enum class QueueType : uint8_t
     MessageCallstack,
     MessageColorCallstack,
     MessageAppInfo,
-    ZoneBeginAllocSrcLoc,
+    ZoneBeginAllocSrcLoc, // C API
     ZoneBeginAllocSrcLocLean,
-    ZoneBeginAllocSrcLocCallstack,
+    ZoneBeginAllocSrcLocCallstack, // C API
     ZoneBeginAllocSrcLocCallstackLean,
     CallstackMemory,
     CallstackMemoryLean,
@@ -25,7 +25,7 @@ enum class QueueType : uint8_t
     CallstackLean,
     CallstackAlloc,
     CallstackAllocLean,
-    CallstackSample,
+    CallstackSample, // SysTrace
     CallstackSampleLean,
     FrameImage,
     FrameImageLean,
@@ -50,15 +50,15 @@ enum class QueueType : uint8_t
     GpuZoneBeginCallstackSerial,
     GpuZoneEndSerial,
     PlotData,
-    ContextSwitch,
-    ThreadWakeup,
+    ContextSwitch, // SysTrace
+    ThreadWakeup, // SysTrace
     GpuTime,
     Terminate,
     KeepAlive,
     ThreadContext,
     Crash,
     CrashReport,
-    ZoneValidation,
+    ZoneValidation, // C API
     ZoneValue,
     FrameMarkMsg,
     FrameMarkMsgStart,
@@ -77,7 +77,7 @@ enum class QueueType : uint8_t
     SymbolInformation,
     CodeInformation,
     SysTimeReport,
-    TidToPid,
+    TidToPid, // SysTrace
     PlotConfig,
     ParamSetup,
     ParamPingback,
@@ -86,7 +86,7 @@ enum class QueueType : uint8_t
     ThreadName,
     CustomStringData,
     PlotName,
-    SourceLocationPayload,
+    SourceLocationPayload, // C API
     CallstackPayload,
     CallstackAllocPayload,
     FrameName,

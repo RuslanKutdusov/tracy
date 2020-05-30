@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "tracy_concurrentqueue.h"
+#include "readerwriterqueue.h"
 #include "TracyCallstack.hpp"
 #include "TracySysTime.hpp"
 #include "TracyFastVector.hpp"
@@ -39,24 +39,29 @@
 #  define TracyConcatIndirect(x,y) x##y
 #endif
 
+namespace
+{
+    // to avoid MSVC warning 4127: conditional expression is constant
+    template <bool>
+    struct compile_time_condition
+    {
+        static const bool value = false;
+    };
+    template <>
+    struct compile_time_condition<true>
+    {
+        static const bool value = true;
+    };
+}
+
 namespace tracy
 {
 
-class GpuCtx;
 class Profiler;
 class Socket;
 class UdpBroadcast;
 
-struct GpuCtxWrapper
-{
-    GpuCtx* ptr;
-};
-
-TRACY_API moodycamel::ConcurrentQueue<QueueItem>::ExplicitProducer* GetToken();
 TRACY_API Profiler& GetProfiler();
-TRACY_API std::atomic<uint32_t>& GetLockCounter();
-TRACY_API std::atomic<uint8_t>& GetGpuCtxCounter();
-TRACY_API GpuCtxWrapper& GetGpuCtx();
 TRACY_API uint64_t GetThreadHandle();
 TRACY_API void InitRPMallocThread();
 
@@ -79,27 +84,57 @@ struct LuaZoneState
 
 
 #define TracyLfqPrepare( _type ) \
-    moodycamel::ConcurrentQueueDefaultTraits::index_t __magic; \
-    auto __token = GetToken(); \
-    auto& __tail = __token->get_tail_index(); \
-    auto item = __token->enqueue_begin( __magic ); \
+    QueueItem itemVar; \
+    QueueItem* item = &itemVar; \
     MemWrite( &item->hdr.type, _type );
 
 #define TracyLfqCommit \
-    __tail.store( __magic + 1, std::memory_order_release );
+    Profiler::GetThreadContext().queue.enqueue(*item);
 
-#define TracyLfqPrepareC( _type ) \
-    tracy::moodycamel::ConcurrentQueueDefaultTraits::index_t __magic; \
-    auto __token = tracy::GetToken(); \
-    auto& __tail = __token->get_tail_index(); \
-    auto item = __token->enqueue_begin( __magic ); \
-    tracy::MemWrite( &item->hdr.type, _type );
+#define TracyLfqPrepareC( _type ) TracyLfqPrepare( _type )
 
-#define TracyLfqCommitC \
-    __tail.store( __magic + 1, std::memory_order_release );
+#define TracyLfqCommitC TracyLfqCommit
 
 
 typedef void(*ParameterCallback)( uint32_t idx, int32_t val );
+
+struct ThreadContext
+{
+    struct Zone
+    {
+        int64_t beginTime = 0;
+        const SourceLocationData* srcLoc = nullptr;
+    };
+
+    static const uint32_t kQueueMaxBlockSize = 64 * 1024;
+    static const uint32_t kInitialQueueSize = 64 * 1024;
+
+    bool pushedToList;
+    uint64_t threadHandle;
+    std::atomic<bool> isActive;
+    FastVector<Zone> zonesStack;
+#ifdef TRACY_ON_DEMAND
+    LuaZoneState luaZoneState;
+#endif
+    moodycamel::ReaderWriterQueue<QueueItem, kQueueMaxBlockSize> queue;
+
+    ThreadContext() 
+       : pushedToList(false)
+       , threadHandle(GetThreadHandle())
+       , isActive(false)
+       , zonesStack(64)
+#ifdef TRACY_ON_DEMAND
+       , luaZoneState({ 0, false })
+#endif
+       , queue(kInitialQueueSize)
+    {
+    }
+
+    ~ThreadContext()
+    {
+
+    }
+};
 
 class Profiler
 {
@@ -153,6 +188,32 @@ public:
     tracy_force_inline uint32_t GetNextZoneId()
     {
         return m_zoneId.fetch_add( 1, std::memory_order_relaxed );
+    }
+
+    tracy_force_inline std::atomic<uint32_t>& GetLockCounter()
+    {
+        return m_lockCounter;
+    }
+
+    tracy_force_inline std::atomic<uint8_t>& GetGpuCtxCounter()
+    {
+        return m_gpuCtxCounter;
+    }
+
+    tracy_force_inline void CheckThread()
+    {
+        if (!s_threadContext.pushedToList)
+        {
+            m_threadsCtxsLock.lock();
+            *m_threadsCtxs.push_next() = &s_threadContext;
+            m_threadsCtxsLock.unlock();
+            s_threadContext.pushedToList = true;
+        }
+    }
+
+    static tracy_force_inline ThreadContext& GetThreadContext()
+    {
+        return s_threadContext;
     }
 
     static tracy_force_inline QueueItem* QueueSerial()
@@ -519,10 +580,10 @@ private:
     static void LaunchCompressWorker( void* ptr ) { ((Profiler*)ptr)->CompressWorker(); }
     void CompressWorker();
 
-    void ClearQueues( tracy::moodycamel::ConsumerToken& token );
+    void ClearQueues();
     void ClearSerial();
-    DequeueStatus Dequeue( tracy::moodycamel::ConsumerToken& token );
-    DequeueStatus DequeueContextSwitches( tracy::moodycamel::ConsumerToken& token, int64_t& timeStop );
+    DequeueStatus Dequeue();
+    DequeueStatus DequeueContextSwitches( int64_t& timeStop );
     DequeueStatus DequeueSerial();
     bool CommitData();
 
@@ -553,7 +614,9 @@ private:
     bool SendData( const char* data, size_t len );
     void SendLongString( uint64_t ptr, const char* str, size_t len, QueueType type );
     void SendSourceLocation( uint64_t ptr );
+#ifdef TRACY_C_API
     void SendSourceLocationPayload( uint64_t ptr );
+#endif
     void SendCallstackPayload( uint64_t ptr );
     void SendCallstackPayload64( uint64_t ptr );
     void SendCallstackAlloc( uint64_t ptr );
@@ -633,10 +696,14 @@ private:
     bool m_noExit;
     uint32_t m_userPort;
     std::atomic<uint32_t> m_zoneId;
+    std::atomic<uint32_t> m_lockCounter;
+    std::atomic<uint8_t> m_gpuCtxCounter;
     int64_t m_samplingPeriod;
+    
+    TracyMutex m_threadsCtxsLock;
+    FastVector<ThreadContext*> m_threadsCtxs;
+    static thread_local ThreadContext s_threadContext;
 
-    uint64_t m_threadCtx;
-    int64_t m_refTimeThread;
     int64_t m_refTimeSerial;
     int64_t m_refTimeCtx;
     int64_t m_refTimeGpu;

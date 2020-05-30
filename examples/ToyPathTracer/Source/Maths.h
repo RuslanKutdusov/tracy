@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "Config.h"
 #include "MathSimd.h"
+#include "../../../Tracy.hpp"
 
 #define kPI 3.1415926f
 
@@ -363,10 +364,15 @@ struct SpheresSoA
         // enough space
         simdCount = (c + (kSimdWidth - 1)) / kSimdWidth * kSimdWidth;
         centerX = new float[simdCount];
+        TracyAlloc(centerX, simdCount * sizeof(float));
         centerY = new float[simdCount];
+        TracyAlloc(centerY, simdCount * sizeof(float));
         centerZ = new float[simdCount];
+        TracyAlloc(centerZ, simdCount * sizeof(float));
         sqRadius = new float[simdCount];
+        TracyAlloc(sqRadius, simdCount * sizeof(float));
         invRadius = new float[simdCount];
+        TracyAlloc(invRadius, simdCount * sizeof(float));
         // set all data to "impossible sphere" state
         for (int i = count; i < simdCount; ++i)
         {
@@ -382,6 +388,11 @@ struct SpheresSoA
         delete[] centerZ;
         delete[] sqRadius;
         delete[] invRadius;
+        TracyFree(centerX);
+        TracyFree(centerY);
+        TracyFree(centerZ);
+        TracyFree(sqRadius);
+        TracyFree(invRadius);
     }
     float* centerX;
     float* centerY;

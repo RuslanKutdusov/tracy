@@ -15,7 +15,7 @@ class LockableCtx
 {
 public:
     tracy_force_inline LockableCtx( const SourceLocationData* srcloc )
-        : m_id( GetLockCounter().fetch_add( 1, std::memory_order_relaxed ) )
+        : m_id( GetProfiler().GetLockCounter().fetch_add( 1, std::memory_order_relaxed ) )
 #ifdef TRACY_ON_DEMAND
         , m_lockCount( 0 )
         , m_active( false )
@@ -228,7 +228,7 @@ class SharedLockableCtx
 {
 public:
     tracy_force_inline SharedLockableCtx( const SourceLocationData* srcloc )
-        : m_id( GetLockCounter().fetch_add( 1, std::memory_order_relaxed ) )
+        : m_id( GetProfiler().GetLockCounter().fetch_add( 1, std::memory_order_relaxed ) )
 #ifdef TRACY_ON_DEMAND
         , m_lockCount( 0 )
         , m_active( false )

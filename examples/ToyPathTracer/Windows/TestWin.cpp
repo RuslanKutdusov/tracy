@@ -73,6 +73,7 @@ static ID3D11Query *g_QueryBegin, *g_QueryEnd, *g_QueryDisjoint;
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow)
 {
     g_Backbuffer = new float[kBackbufferWidth * kBackbufferHeight * 4];
+    TracyAllocS(g_Backbuffer, sizeof(float) * kBackbufferWidth * kBackbufferHeight * 4, 4);
     memset(g_Backbuffer, 0, kBackbufferWidth * kBackbufferHeight * 4 * sizeof(g_Backbuffer[0]));
 
     InitializeTest();
@@ -270,7 +271,8 @@ static int s_FrameCount = 0;
 
 static void RenderFrame()
 {
-    ZoneScoped;
+    ZoneScopedN("Fuck");;
+    //TracyMessageL("Hey");
 
     LARGE_INTEGER time1;
 

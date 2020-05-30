@@ -238,12 +238,21 @@ static float3 Trace(const Ray& r, int depth, int& inoutRayCount, uint32_t& state
 static enkiTaskScheduler* g_TS;
 #endif
 
+void RegisterThread(uint32_t threadNum)
+{
+     char buf[256];
+     sprintf_s(buf, "EnkiThread%u", threadNum);
+     tracy::SetThreadName(buf);
+}
+
+
 void InitializeTest()
 {
     ZoneScoped;
     #if CPU_CAN_DO_THREADS
     g_TS = enkiNewTaskScheduler();
     enkiInitTaskSchedulerNumThreads(g_TS, std::max<int>( 2, std::thread::hardware_concurrency() - 2));
+    enkiGetProfilerCallbacks(g_TS)->threadStart = RegisterThread;
     #endif
 }
 
