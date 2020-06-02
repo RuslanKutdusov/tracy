@@ -15,9 +15,9 @@ enum class QueueType : uint8_t
     MessageCallstack,
     MessageColorCallstack,
     MessageAppInfo,
-    ZoneBeginAllocSrcLoc, // C API
+    ZoneBeginAllocSrcLoc,
     ZoneBeginAllocSrcLocLean,
-    ZoneBeginAllocSrcLocCallstack, // C API
+    ZoneBeginAllocSrcLocCallstack,
     ZoneBeginAllocSrcLocCallstackLean,
     CallstackMemory,
     CallstackMemoryLean,
@@ -86,7 +86,7 @@ enum class QueueType : uint8_t
     ThreadName,
     CustomStringData,
     PlotName,
-    SourceLocationPayload, // C API
+    SourceLocationPayload,
     CallstackPayload,
     CallstackAllocPayload,
     FrameName,

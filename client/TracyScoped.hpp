@@ -15,24 +15,14 @@ namespace tracy
 class ScopedZone
 {
 public:
-    tracy_force_inline ScopedZone( const SourceLocationData* srcloc, bool is_active = true )
-#ifdef TRACY_ON_DEMAND
-        : m_active( is_active && GetProfiler().IsConnected() )
-#else
-        : m_active( is_active )
-#endif
+    tracy_force_inline ScopedZone( const SourceLocationData* srcloc, bool active )
     {
-        Profiler::BeginZone(srcloc);
+        Profiler::BeginZone( srcloc, active );
     }
 
-    tracy_force_inline ScopedZone( const SourceLocationData* srcloc, int depth, bool is_active = true )
-#ifdef TRACY_ON_DEMAND
-        : m_active( is_active && GetProfiler().IsConnected() )
-#else
-        : m_active( is_active )
-#endif
+    tracy_force_inline ScopedZone( const SourceLocationData* srcloc, int depth, bool active )
     {
-        Profiler::BeginZoneS( srcloc, depth );
+        Profiler::BeginZone<true>( srcloc, active, depth );
     }
 
     tracy_force_inline ~ScopedZone()
@@ -42,49 +32,18 @@ public:
 
     tracy_force_inline void Text( const char* txt, size_t size )
     {
-        if( !m_active ) return;
-#ifdef TRACY_ON_DEMAND
-        if( GetProfiler().ConnectionId() != m_connectionId ) return;
-#endif
-        auto ptr = (char*)tracy_malloc( size+1 );
-        memcpy( ptr, txt, size );
-        ptr[size] = '\0';
-        TracyLfqPrepare( QueueType::ZoneText );
-        MemWrite( &item->zoneText.text, (uint64_t)ptr );
-        TracyLfqCommit;
+        Profiler::ZoneText( txt, size );
     }
 
     tracy_force_inline void Name( const char* txt, size_t size )
     {
-        if( !m_active ) return;
-#ifdef TRACY_ON_DEMAND
-        if( GetProfiler().ConnectionId() != m_connectionId ) return;
-#endif
-        auto ptr = (char*)tracy_malloc( size+1 );
-        memcpy( ptr, txt, size );
-        ptr[size] = '\0';
-        TracyLfqPrepare( QueueType::ZoneName );
-        MemWrite( &item->zoneText.text, (uint64_t)ptr );
-        TracyLfqCommit;
+        Profiler::ZoneName( txt, size );
     }
 
     tracy_force_inline void Value( uint64_t value )
     {
-        if( !m_active ) return;
-#ifdef TRACY_ON_DEMAND
-        if( GetProfiler().ConnectionId() != m_connectionId ) return;
-#endif
-        TracyLfqPrepare( QueueType::ZoneValue );
-        MemWrite( &item->zoneValue.value, value );
-        TracyLfqCommit;
+        Profiler::ZoneValue( value );
     }
-
-private:
-    const bool m_active;
-
-#ifdef TRACY_ON_DEMAND
-    uint64_t m_connectionId;
-#endif
 };
 
 }
