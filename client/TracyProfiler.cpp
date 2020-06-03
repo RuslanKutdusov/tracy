@@ -1373,29 +1373,33 @@ void Profiler::Worker()
         }
         m_deferredLock.unlock();
 
+        int64_t activationTime = GetTime();
+
         m_threadsCtxsLock.lock();
         for( ThreadContext* ctx : m_threadsCtxs )
         {
+            if( ctx->zoneStackCanary != ThreadContext::kZoneStackCanaryValue )
+                continue;
+
             ctx->Lock();
 
             QueueItem item;
             MemWrite( &item.hdr.type, QueueType::ThreadContext );
             MemWrite( &item.threadCtx.thread, ctx->threadHandle );
+            AppendData( &item, QueueDataSize[(int)QueueType::ThreadContext] );
 
-            int64_t zonesBeginTime = GetTime();
-            for( int i = 0; i <= ctx->zoneStackIdx; i++ )
+            for( uint32_t i = 0; i <= ctx->zoneStackIdx; i++ )
             {
                 ThreadContext::Zone& zone = ctx->zoneStack[i];
-#   ifndef TRACY_NO_VERIFY
-                ZoneVerify( zone.id );
-#   endif
-                TracyLfqPrepare( QueueType::ZoneBegin );
-                MemWrite( &item->zoneBegin.time, zonesBeginTime );
-                MemWrite( &item->zoneBegin.srcloc, (uint64_t)zone.srcLoc );
-                TracyLfqCommit;
+                MemWrite( &item.hdr.type, zone.beginType );
+                MemWrite( &item.zoneBegin.time, activationTime );
+                MemWrite( &item.zoneBegin.srcloc, (uint64_t)zone.srcLoc );
+                AppendData( &item, QueueDataSize[(int)zone.beginType] );
 
-                zone.connectionId = ConnectionId();
+                if( zone.beginType == QueueType::ZoneBeginAllocSrcLoc )
+                    tracy_free( (void*)zone.srcLoc );
             }
+            ctx->isActive.store( true, std::memory_order_release );
             ctx->Unlock();
         }
         m_threadsCtxsLock.unlock();
@@ -1699,19 +1703,9 @@ static void FreeAssociatedMemory( const QueueItem& item )
     }
 }
 
-void Profiler::ValidateThreadContexts_NoLock()
-{
-    for( ThreadContext* ctx : m_threadsCtxs )
-    {
-        assert( ctx->zoneStackCanary0 == ThreadContext::kZoneStackCanary0Value );
-        assert( ctx->zoneStackCanary1 == ThreadContext::kZoneStackCanary1Value );
-    }
-}
-
 void Profiler::ClearQueues()
 {
     m_threadsCtxsLock.lock();
-    ValidateThreadContexts_NoLock();
     size_t numThreads = m_threadsCtxs.size();
     ThreadContext** ctxs = static_cast<ThreadContext**>(alloca(numThreads * sizeof(ThreadContext*)));
     memcpy(ctxs, m_threadsCtxs.data(), numThreads * sizeof(ThreadContext*));
@@ -1778,7 +1772,6 @@ Profiler::DequeueStatus Profiler::Dequeue()
     bool connectionLost = false;
 
     m_threadsCtxsLock.lock();
-    ValidateThreadContexts_NoLock();
     size_t numThreads = m_threadsCtxs.size();
     ThreadContext** ctxs = static_cast<ThreadContext**>(alloca(numThreads * sizeof(ThreadContext*)));
     memcpy(ctxs, m_threadsCtxs.data(), numThreads * sizeof(ThreadContext*));
@@ -1788,6 +1781,16 @@ Profiler::DequeueStatus Profiler::Dequeue()
     for( size_t t = 0; t < numThreads; t++ )
     {
         ThreadContext* ctx = ctxs[t];
+
+        if( ctx->zoneStackCanary != ThreadContext::kZoneStackCanaryValue )
+        {
+            QueueItem item;
+            while( ctxs[t]->queue.try_dequeue( item ) )
+            {
+                FreeAssociatedMemory( item );
+            }
+            continue;
+        }
 
         QueueItem item;
         MemWrite(&item.hdr.type, QueueType::ThreadContext);
@@ -1991,7 +1994,6 @@ Profiler::DequeueStatus Profiler::Dequeue()
 Profiler::DequeueStatus Profiler::DequeueContextSwitches( int64_t& timeStop )
 {
     m_threadsCtxsLock.lock();
-    ValidateThreadContexts_NoLock();
     size_t numThreads = m_threadsCtxs.size();
     ThreadContext** ctxs = static_cast<ThreadContext**>(alloca(numThreads * sizeof(ThreadContext*)));
     memcpy(ctxs, m_threadsCtxs.data(), numThreads * sizeof(ThreadContext*));

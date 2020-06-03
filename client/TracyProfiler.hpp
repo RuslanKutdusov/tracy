@@ -97,49 +97,54 @@ struct ThreadContext
 {
     struct Zone
     {
-#ifndef TRACY_NO_VERIFY
-       uint32_t id = 0;
-#endif
 #ifdef TRACY_ON_DEMAND
-        uint64_t connectionId = 0;
         const SourceLocationData* srcLoc = nullptr;
+        QueueType beginType;
 #endif
         bool active = false;
     };
 
     static const uint32_t kQueueMaxBlockSize = 32 * 1024;
     static const uint32_t kInitialQueueSize = 32 * 1024;
-    static const uint32_t kZoneStackSize = 256;
-    static const uint32_t kZoneStackCanary0Value = 0xDEADBEE0;
-    static const uint32_t kZoneStackCanary1Value = 0xDEADBEE1;
+    static const uint32_t kZoneStackCapacity = 255;
+    static const uint32_t kZoneStackCanaryValue = 0xDEADBEE0;
 
     uint64_t threadHandle;
 #ifdef TRACY_ON_DEMAND
+    int64_t activationTime = 0;
     std::atomic<bool> isActive = false;
-    std::atomic_flag endZoneLock = ATOMIC_FLAG_INIT;
+    std::atomic_flag spinLock = ATOMIC_FLAG_INIT;
 #endif
 
     moodycamel::ReaderWriterQueue<QueueItem, kQueueMaxBlockSize> queue;
     std::atomic<bool> markedToDeletion = false;
-    int32_t zoneStackIdx = -1;
-    uint32_t zoneStackCanary0 = kZoneStackCanary0Value;
-    Zone zoneStack[kZoneStackSize];
-    uint32_t zoneStackCanary1 = kZoneStackCanary1Value;
+    uint32_t zoneStackIdx = kZoneStackCapacity;
+    Zone zoneStack[kZoneStackCapacity];
+    union
+    {
+        Zone dummyZone;
+        uint32_t zoneStackCanary;
+    };
 
     ThreadContext() 
         : threadHandle( GetThreadHandle() )
         , queue( kInitialQueueSize )
+        , zoneStackCanary( kZoneStackCanaryValue )
     {
     }
 
     void Lock()
     {
-        while( endZoneLock.test_and_set( std::memory_order_acquire ) ) {}
+#ifdef TRACY_ON_DEMAND
+        while( spinLock.test_and_set( std::memory_order_acquire ) ) {}
+#endif
     }
 
     void Unlock()
     {
-        endZoneLock.clear( std::memory_order_release );
+#ifdef TRACY_ON_DEMAND
+        spinLock.clear( std::memory_order_release );
+#endif
     }
 };
 
@@ -241,18 +246,27 @@ public:
     static tracy_force_inline void BeginZoneBase( const SourceLocationData* srcloc, int depth, bool active )
     {
         ThreadContext& ctx = GetThreadContext();
-        ThreadContext::Zone& zone = ctx.zoneStack[++ctx.zoneStackIdx];
+        ctx.Lock();
+        ctx.zoneStackIdx = (ctx.zoneStackIdx + 1) & ThreadContext::kZoneStackCapacity;
+        ThreadContext::Zone& zone = ctx.zoneStack[ctx.zoneStackIdx];
         zone.active = active;
 
-#ifndef TRACY_NO_VERIFY
-        uint32_t id = GetProfiler().GetNextZoneId();
-        ZoneVerify( id );
-        zone.id = id;
-#endif
+        if( !active )
+        {
+            ctx.Unlock();
+            return;
+        }
 
 #ifdef TRACY_ON_DEMAND
-        zone.connectionId = GetProfiler().ConnectionId();
         zone.srcLoc = srcloc;
+        zone.beginType = kAllocSrcLoc ? QueueType::ZoneBeginAllocSrcLoc : QueueType::ZoneBegin;
+
+        if( !ctx.isActive.load(std::memory_order_acquire) )
+        {
+            ctx.Unlock();
+            return;
+        }
+        ctx.Unlock();
 #endif
 
         QueueType type = QueueType::ZoneBegin;
@@ -273,67 +287,44 @@ public:
     template<bool kCallstack = false>
     static tracy_force_inline void BeginZone( const SourceLocationData* srcloc, bool active, int depth = 0 )
     {
-#ifdef TRACY_ON_DEMAND
-        ThreadContext& ctx = GetThreadContext();
-        if (!ctx.isActive.load(std::memory_order_acquire))
-            return;
-#endif
         BeginZoneBase<kCallstack, false>( srcloc, depth, active );
     }
 
     template<bool kCallstack = false>
     static tracy_force_inline void BeginZone( uint32_t line, const char* source, const char* function, bool active, int depth = 0 )
     {
-#ifdef TRACY_ON_DEMAND
-        ThreadContext& ctx = GetThreadContext();
-        if (!ctx.isActive.load(std::memory_order_acquire))
-            return;
-#endif
-        SourceLocationData* srcloc = (SourceLocationData*)AllocSourceLocation( line, source, function );
+        SourceLocationData* srcloc = active ? (SourceLocationData*)AllocSourceLocation( line, source, function ) : nullptr;
         BeginZoneBase<kCallstack, true>( srcloc, depth, active );
     }
 
     template<bool kCallstack = false>
     static tracy_force_inline void BeginZone( uint32_t line, const char* source, const char* function, const char* name, size_t nameSz, bool active, int depth = 0 )
     {
-#ifdef TRACY_ON_DEMAND
-        ThreadContext& ctx = GetThreadContext();
-        if (!ctx.isActive.load(std::memory_order_acquire))
-            return;
-#endif
-        SourceLocationData* srcloc = (SourceLocationData*)AllocSourceLocation( line, source, function, name, nameSz );
+        SourceLocationData* srcloc = active ? (SourceLocationData*)AllocSourceLocation( line, source, function, name, nameSz ) : nullptr;
         BeginZoneBase<kCallstack, true>( srcloc, depth, active );
     }
 
     static tracy_force_inline void EndZone()
     {
         ThreadContext& ctx = GetThreadContext();
-        ThreadContext::Zone& zone = ctx.zoneStack[ctx.zoneStackIdx--];
-        if( !zone.active )
-            return;
-
-#ifdef TRACY_ON_DEMAND
         ctx.Lock();
-        if( !ctx.isActive.load( std::memory_order_acquire ) )
+        ThreadContext::Zone& zone = ctx.zoneStack[ctx.zoneStackIdx];
+        ctx.zoneStackIdx = (ctx.zoneStackIdx - 1) & ThreadContext::kZoneStackCapacity;
+        if( !zone.active )
+        {
+            ctx.Unlock();
             return;
-#endif
+        }
 
 #ifdef TRACY_ON_DEMAND
-        if( zone.connectionId != GetProfiler().ConnectionId() )
+        if( !ctx.isActive.load( std::memory_order_acquire ) )
         {
-#   ifndef TRACY_NO_VERIFY
-            ZoneVerify( zone.id );
-#   endif
-            TracyLfqPrepare( QueueType::ZoneBegin );
-            MemWrite( &item->zoneBegin.time, time );
-            MemWrite( &item->zoneBegin.srcloc, (uint64_t)zone.srcLoc );
-            TracyLfqCommit;
+            if( zone.beginType == QueueType::ZoneBeginAllocSrcLoc )
+                tracy_free( (void*)zone.srcLoc );
+            ctx.Unlock();
+            return;
         }
         ctx.Unlock();
-#endif
-
-#ifndef TRACY_NO_VERIFY
-        ZoneVerify( zone.id );
 #endif
 
         TracyLfqPrepare( QueueType::ZoneEnd );
@@ -345,7 +336,8 @@ public:
     {
 #ifdef TRACY_ON_DEMAND
         ThreadContext& ctx = GetThreadContext();
-        if( !ctx.isActive.load( std::memory_order_acquire ) )
+        ThreadContext::Zone& zone = ctx.zoneStack[ctx.zoneStackIdx];
+        if( !zone.active || !ctx.isActive.load( std::memory_order_acquire ) )
             return;
 #endif
         auto ptr = (char*)tracy_malloc( size+1 );
@@ -360,7 +352,8 @@ public:
     {
 #ifdef TRACY_ON_DEMAND
         ThreadContext& ctx = GetThreadContext();
-        if( !ctx.isActive.load( std::memory_order_acquire ) )
+        ThreadContext::Zone& zone = ctx.zoneStack[ctx.zoneStackIdx];
+        if( !zone.active || !ctx.isActive.load( std::memory_order_acquire ) )
             return;
 #endif
         auto ptr = (char*)tracy_malloc( size+1 );
@@ -375,7 +368,8 @@ public:
     {
 #ifdef TRACY_ON_DEMAND
         ThreadContext& ctx = GetThreadContext();
-        if( !ctx.isActive.load( std::memory_order_acquire ) )
+        ThreadContext::Zone& zone = ctx.zoneStack[ctx.zoneStackIdx];
+        if( !zone.active || !ctx.isActive.load( std::memory_order_acquire ) )
             return;
 #endif
         TracyLfqPrepare( QueueType::ZoneValue );
@@ -733,7 +727,6 @@ private:
     static void LaunchCompressWorker( void* ptr ) { ((Profiler*)ptr)->CompressWorker(); }
     void CompressWorker();
 
-    void ValidateThreadContexts_NoLock();
     void ClearQueues();
     void ClearSerial();
     void RemoveMarkedThreadContexts();
